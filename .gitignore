@@ -1,0 +1,6 @@
+# 避免上傳
+data/
+dataset/
+seg_mask/
+raw_image/
+output_result/
