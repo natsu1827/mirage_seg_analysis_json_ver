@@ -32,29 +32,30 @@ class AMDVisualizer:
         self.filename = filename
         self.pixel_spacing = pixel_spacing
         
-        # 1. 讀取原始影像 (轉為 RGBA)
+        # 1. 【關鍵】讀取原始影像，並鎖定尺寸為「標準」
         self.raw_image = Image.open(raw_path).convert("RGBA")
         self.width, self.height = self.raw_image.size
+        # print(f"Debug: Raw Image Size: {self.width}x{self.height}")
         
-        # 2. 建立一個全透明的圖層 (用於繪製標註)
-        # (0, 0, 0, 0) 代表完全透明
+        # 2. 建立一個與原圖「尺寸完全相同」的全透明圖層
         self.overlay_image = Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
-        
-        # 3. 將畫筆設定在「透明圖層」上，而不是原圖上
         self.draw = ImageDraw.Draw(self.overlay_image)
         
-        # 讀取 Mask 並處理尺寸
+        # 3. 讀取 Mask 並強制調整至原圖尺寸
         mask_img = Image.open(mask_path)
-        self.mask_array = np.array(mask_img)
         
-        if self.mask_array.shape[:2] != (self.height, self.width):
-            print(f"Warning: Resizing mask for {filename}")
+        # 如果 Mask 尺寸跟原圖不一樣，強制 Resize Mask (使用 NEAREST 保持 Label 數值)
+        if mask_img.size != (self.width, self.height):
+            print(f"Warning: Mask size {mask_img.size} mismatch. Resizing to {self.width}x{self.height}")
             mask_img = mask_img.resize((self.width, self.height), resample=Image.NEAREST)
-            self.mask_array = np.array(mask_img)
+            
+        self.mask_array = np.array(mask_img)
 
         # 儲存結果數據
         self.results = {
             "filename": filename,
+            "image_width": self.width,   # 紀錄尺寸供前端參考
+            "image_height": self.height,
             "pixel_spacing_um": pixel_spacing,
             "measurements": {}
         }
@@ -71,7 +72,7 @@ class AMDVisualizer:
             return {"value": round(val_mm2, 4), "unit": "mm2"}
 
     def draw_contours(self):
-        """針對 SRF & Cyst：繪製空心輪廓 (畫在 overlay_image 上)"""
+        """針對 SRF & Cyst：繪製空心輪廓"""
         targets = [
             (LABEL_SRF, "SRF"),
             (LABEL_CYST, "Cyst")
@@ -92,15 +93,15 @@ class AMDVisualizer:
                 mask_img = Image.fromarray(binary_mask, mode='L')
                 edges = mask_img.filter(ImageFilter.FIND_EDGES)
                 
-                # 建立純色層
+                # 建立純色層 (尺寸確保與原圖一致)
                 color_rgb = COLORS[name]["rgb"]
                 color_layer = Image.new("RGBA", (self.width, self.height), color_rgb)
                 
-                # 【關鍵修改】貼到 overlay_image 上，而不是 raw_image
+                # 貼到 overlay_image 上
                 self.overlay_image.paste(color_layer, (0, 0), mask=edges)
 
     def draw_vertical_caliper(self):
-        """針對 PED：繪製垂直測量線 (畫在 overlay_image 上)"""
+        """針對 PED：繪製垂直測量線"""
         label_val = LABEL_PED
         name = "PED"
         y_idxs, x_idxs = np.where(self.mask_array == label_val)
@@ -126,7 +127,6 @@ class AMDVisualizer:
             "color": COLORS[name]["hex"]
         }
 
-        # 繪圖 (self.draw 已經指向 overlay_image)
         color = COLORS[name]["rgb"]
         lw = 2
         cap = 8
@@ -135,7 +135,7 @@ class AMDVisualizer:
         self.draw.line([(best_x-cap, best_y2), (best_x+cap, best_y2)], fill=color, width=lw)
 
     def draw_horizontal_caliper(self):
-        """針對 Drusen：繪製水平測量線 (畫在 overlay_image 上)"""
+        """針對 Drusen：繪製水平測量線"""
         label_val = LABEL_DRUSEN
         name = "Drusen"
         y_idxs, x_idxs = np.where(self.mask_array == label_val)
@@ -167,15 +167,16 @@ class AMDVisualizer:
     def save_results(self):
         base_name = os.path.splitext(self.filename)[0]
         
-        # 1. 儲存純透明標註圖 (Overlay) - 必須存為 PNG 以保留透明度
+        # 1. 儲存純透明標註圖 (Overlay)
+        # 尺寸保證：self.overlay_image 初始化時即鎖定為 self.width/height
         overlay_filename = f"{base_name}_overlay.png"
         overlay_path = os.path.join(OUTPUT_DIR, overlay_filename)
         self.overlay_image.save(overlay_path)
         
-        # 2. 儲存合成圖 (Combined) - 將透明層疊在原圖上
-        # 使用 alpha_composite 進行高品質疊圖
+        # 2. 儲存合成圖 (Combined)
+        # 尺寸保證：self.raw_image 與 self.overlay_image 尺寸完全一致
         combined_img = Image.alpha_composite(self.raw_image, self.overlay_image)
-        analyzed_filename = f"{base_name}_analyzed.jpg"
+        analyzed_filename = f"{base_name}_analyzed.png"
         analyzed_path = os.path.join(OUTPUT_DIR, analyzed_filename)
         combined_img.convert("RGB").save(analyzed_path)
         
@@ -183,9 +184,8 @@ class AMDVisualizer:
         json_filename = f"{base_name}_result.json"
         json_path = os.path.join(OUTPUT_DIR, json_filename)
         
-        # 更新 JSON 資訊
-        self.results["output_image"] = analyzed_filename  # 合成圖
-        self.results["overlay_image"] = overlay_filename  # 透明圖 (新增)
+        self.results["output_image"] = analyzed_filename
+        self.results["overlay_image"] = overlay_filename
         
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(self.results, f, indent=4, ensure_ascii=False)
@@ -223,13 +223,12 @@ def main():
             viz.draw_vertical_caliper()
             viz.draw_horizontal_caliper()
             
-            # 接收三個回傳路徑
             img_out, overlay_out, json_out = viz.save_results()
             
             print(f"完成: {filename}")
+            print(f"  -> 尺寸: {viz.width}x{viz.height}")
             print(f"  -> 合成圖: {img_out}")
             print(f"  -> 透明圖: {overlay_out}")
-            print(f"  -> 數據檔: {json_out}")
             
         except Exception as e:
             print(f"[ERROR] {filename}: {e}")
