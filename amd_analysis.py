@@ -2,6 +2,7 @@ import os
 import json
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
+from scipy.ndimage import label
 
 # ==========================================
 # 設定區
@@ -17,14 +18,15 @@ USER_PIXEL_SPACING = None
 LABEL_SRF = 161    # Mask 6
 LABEL_CYST = 115   # Mask 5
 LABEL_PED = 138    # Mask 5
-LABEL_DRUSEN = 69  # Mask 3
+
+# PED 區域高度閾值：小於此值使用箭頭標示，否則使用工字線
+MIN_HEIGHT_FOR_CALIPER = 15
 
 # 色盲友善配色
 COLORS = {
     "SRF":    {"hex": "#00FFFF", "rgb": (0, 255, 255)},    # Cyan
     "Cyst":   {"hex": "#FFA500", "rgb": (255, 165, 0)},    # Orange
-    "PED":    {"hex": "#FF00FF", "rgb": (255, 0, 255)},    # Magenta
-    "Drusen": {"hex": "#FFFF00", "rgb": (255, 255, 0)}     # Yellow
+    "PED":    {"hex": "#FF00FF", "rgb": (255, 0, 255)}     # Magenta
 }
 
 class AMDVisualizer:
@@ -48,7 +50,9 @@ class AMDVisualizer:
         if mask_img.size != (self.width, self.height):
             print(f"Warning: Mask size {mask_img.size} mismatch. Resizing to {self.width}x{self.height}")
             mask_img = mask_img.resize((self.width, self.height), resample=Image.NEAREST)
-            
+        
+        # 保存 mask 圖像為 RGBA 格式，用於後續合成
+        self.mask_image = mask_img.convert("RGBA")
         self.mask_array = np.array(mask_img)
 
         # 儲存結果數據
@@ -70,6 +74,34 @@ class AMDVisualizer:
         elif type == "area":
             val_mm2 = value_px * (self.pixel_spacing ** 2) / 1_000_000
             return {"value": round(val_mm2, 4), "unit": "mm2"}
+
+    def _draw_arrow(self, tip_x, bottom_y, size, color):
+        """繪製箭頭於色塊下方：尖端指向灰度值138封閉色塊的底部，三角形與尾巴繪在下方不遮住色塊
+        
+        Args:
+            tip_x: 箭頭尖端 x 座標（色塊底部該排的中心）
+            bottom_y: 灰度值138封閉色塊底部 y 座標（箭頭尖端指向此）
+            size: 箭頭大小（約 5-8 像素）
+            color: 箭頭顏色 (R, G, B)
+        """
+        arrow_size = size
+        half_width = arrow_size * 0.4
+        tail_len = 6  # 尾巴線條長度（像素）
+        
+        # 尖端對準色塊底部；三角形畫在色塊下方（不遮住色塊）
+        # 尖端向下移動 3px，與色塊保持距離
+        x_tip = tip_x
+        y_tip = bottom_y + 3  # 向下 3px，與色塊保持距離
+        y_base = bottom_y + arrow_size + 3  # 三角形底邊也相應下移
+        x1 = tip_x - half_width
+        y1 = y_base
+        x2 = tip_x + half_width
+        y2 = y_base
+        
+        # 實心三角形（箭頭，尖端朝上對準色塊底部）
+        self.draw.polygon([(x1, y1), (x2, y2), (x_tip, y_tip)], fill=color)
+        # 尾巴線條：從三角形底邊中心向下延伸
+        self.draw.line([(tip_x, y_base), (tip_x, y_base + tail_len)], fill=color, width=1)
 
     def draw_contours(self):
         """針對 SRF & Cyst：繪製空心輪廓"""
@@ -101,68 +133,73 @@ class AMDVisualizer:
                 self.overlay_image.paste(color_layer, (0, 0), mask=edges)
 
     def draw_vertical_caliper(self):
-        """針對 PED：繪製垂直測量線"""
+        """針對 PED：對每個封閉區域繪製垂直測量線"""
         label_val = LABEL_PED
         name = "PED"
-        y_idxs, x_idxs = np.where(self.mask_array == label_val)
         
-        if len(x_idxs) == 0: return
-
-        unique_xs = np.unique(x_idxs)
-        max_h = 0
-        best_x, best_y1, best_y2 = 0, 0, 0
-
-        for x in unique_xs:
-            ys = y_idxs[x_idxs == x]
-            h = ys.max() - ys.min()
-            if h > max_h:
-                max_h = h
-                best_x = x
-                best_y1 = ys.min()
-                best_y2 = ys.max()
-
-        self.results["measurements"][name] = {
-            "type": "Max Height",
-            "data": self._format_value(max_h, type="length"),
-            "color": COLORS[name]["hex"]
-        }
-
+        # 建立二值化遮罩
+        binary_mask = (self.mask_array == label_val).astype(int)
+        
+        # 使用連通組件標記找出所有封閉區域
+        labeled_array, num_features = label(binary_mask)
+        
+        if num_features == 0:
+            return
+        
+        # 儲存所有區域的測量值
+        measurements_list = []
         color = COLORS[name]["rgb"]
         lw = 2
         cap = 8
-        self.draw.line([(best_x, best_y1), (best_x, best_y2)], fill=color, width=lw)
-        self.draw.line([(best_x-cap, best_y1), (best_x+cap, best_y1)], fill=color, width=lw)
-        self.draw.line([(best_x-cap, best_y2), (best_x+cap, best_y2)], fill=color, width=lw)
-
-    def draw_horizontal_caliper(self):
-        """針對 Drusen：繪製水平測量線"""
-        label_val = LABEL_DRUSEN
-        name = "Drusen"
-        y_idxs, x_idxs = np.where(self.mask_array == label_val)
         
-        if len(x_idxs) == 0: return
-
-        base_y = np.max(y_idxs)
-        bottom_pixels = x_idxs[y_idxs >= (base_y - 3)]
+        # 對每個連通區域處理
+        for region_id in range(1, num_features + 1):
+            # 提取該區域的所有像素座標
+            y_idxs, x_idxs = np.where(labeled_array == region_id)
+            
+            if len(x_idxs) == 0:
+                continue
+            
+            # 找出該區域內所有唯一的 x 座標
+            unique_xs = np.unique(x_idxs)
+            max_h = 0
+            best_x, best_y1, best_y2 = 0, 0, 0
+            
+            # 對每個 x 座標計算垂直高度
+            for x in unique_xs:
+                ys = y_idxs[x_idxs == x]
+                h = ys.max() - ys.min()
+                if h > max_h:
+                    max_h = h
+                    best_x = x
+                    best_y1 = ys.min()
+                    best_y2 = ys.max()
+            
+            # 記錄該區域的測量值
+            measurements_list.append(self._format_value(max_h, type="length"))
+            
+            # 根據區域高度選擇標示方式
+            if max_h < MIN_HEIGHT_FOR_CALIPER:
+                # 小區域：箭頭指向灰度值138封閉色塊的底部（最底一排像素的中心）
+                bottom_y = float(y_idxs.max())
+                bottom_row_x = x_idxs[y_idxs == bottom_y]
+                tip_x = float((bottom_row_x.min() + bottom_row_x.max()) / 2)
+                arrow_size = 7
+                self._draw_arrow(tip_x, bottom_y, arrow_size, color)
+            else:
+                # 大區域：使用工字線（垂直線 + 上下橫線）
+                self.draw.line([(best_x, best_y1), (best_x, best_y2)], fill=color, width=lw)
+                self.draw.line([(best_x-cap, best_y1), (best_x+cap, best_y1)], fill=color, width=lw)
+                self.draw.line([(best_x-cap, best_y2), (best_x+cap, best_y2)], fill=color, width=lw)
         
-        if len(bottom_pixels) == 0: return
+        # 將所有測量值儲存為數組格式
+        if measurements_list:
+            self.results["measurements"][name] = {
+                "type": "Max Height",
+                "data": measurements_list,
+                "color": COLORS[name]["hex"]
+            }
 
-        min_x, max_x = np.min(bottom_pixels), np.max(bottom_pixels)
-        width_px = max_x - min_x
-        
-        self.results["measurements"][name] = {
-            "type": "Max Width",
-            "data": self._format_value(width_px, type="length"),
-            "color": COLORS[name]["hex"]
-        }
-
-        color = COLORS[name]["rgb"]
-        draw_y = base_y + 2
-        lw = 2
-        cap = 5
-        self.draw.line([(min_x, draw_y), (max_x, draw_y)], fill=color, width=lw)
-        self.draw.line([(min_x, draw_y-cap), (min_x, draw_y+cap)], fill=color, width=lw)
-        self.draw.line([(max_x, draw_y-cap), (max_x, draw_y+cap)], fill=color, width=lw)
 
     def save_results(self):
         base_name = os.path.splitext(self.filename)[0]
@@ -173,24 +210,32 @@ class AMDVisualizer:
         overlay_path = os.path.join(OUTPUT_DIR, overlay_filename)
         self.overlay_image.save(overlay_path)
         
-        # 2. 儲存合成圖 (Combined)
+        # 2. 儲存合成圖 (原始圖像 + 量測結果)
         # 尺寸保證：self.raw_image 與 self.overlay_image 尺寸完全一致
         combined_img = Image.alpha_composite(self.raw_image, self.overlay_image)
         analyzed_filename = f"{base_name}_analyzed.png"
         analyzed_path = os.path.join(OUTPUT_DIR, analyzed_filename)
         combined_img.convert("RGB").save(analyzed_path)
         
-        # 3. 儲存 JSON
+        # 3. 儲存 Mask 與量測結果的合成圖
+        # 尺寸保證：self.mask_image 與 self.overlay_image 尺寸完全一致
+        mask_combined_img = Image.alpha_composite(self.mask_image, self.overlay_image)
+        mask_analyzed_filename = f"{base_name}_mask_analyzed.png"
+        mask_analyzed_path = os.path.join(OUTPUT_DIR, mask_analyzed_filename)
+        mask_combined_img.convert("RGB").save(mask_analyzed_path)
+        
+        # 4. 儲存 JSON
         json_filename = f"{base_name}_result.json"
         json_path = os.path.join(OUTPUT_DIR, json_filename)
         
         self.results["output_image"] = analyzed_filename
         self.results["overlay_image"] = overlay_filename
+        self.results["mask_analyzed_image"] = mask_analyzed_filename
         
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(self.results, f, indent=4, ensure_ascii=False)
             
-        return analyzed_path, overlay_path, json_path
+        return analyzed_path, overlay_path, mask_analyzed_path, json_path
 
 # ==========================================
 # 主程式
@@ -221,14 +266,14 @@ def main():
             
             viz.draw_contours()
             viz.draw_vertical_caliper()
-            viz.draw_horizontal_caliper()
             
-            img_out, overlay_out, json_out = viz.save_results()
+            img_out, overlay_out, mask_out, json_out = viz.save_results()
             
             print(f"完成: {filename}")
             print(f"  -> 尺寸: {viz.width}x{viz.height}")
             print(f"  -> 合成圖: {img_out}")
             print(f"  -> 透明圖: {overlay_out}")
+            print(f"  -> Mask合成圖: {mask_out}")
             
         except Exception as e:
             print(f"[ERROR] {filename}: {e}")
