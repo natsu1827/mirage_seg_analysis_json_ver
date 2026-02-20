@@ -11,9 +11,6 @@ INPUT_RAW_DIR = "raw_image"
 INPUT_MASK_DIR = "seg_mask"
 OUTPUT_DIR = "output_result"
 
-# 模擬前端輸入：若無數據請設為 None，若有數據請設為 float (例如 3.5)
-USER_PIXEL_SPACING = None 
-
 # AROI JSON Label 定義
 LABEL_SRF = 161    # Mask 6
 LABEL_CYST = 115   # Mask 5
@@ -30,9 +27,8 @@ COLORS = {
 }
 
 class AMDVisualizer:
-    def __init__(self, raw_path, mask_path, filename, pixel_spacing=None):
+    def __init__(self, raw_path, mask_path, filename):
         self.filename = filename
-        self.pixel_spacing = pixel_spacing
         
         # 1. 【關鍵】讀取原始影像，並鎖定尺寸為「標準」
         self.raw_image = Image.open(raw_path).convert("RGBA")
@@ -60,20 +56,12 @@ class AMDVisualizer:
             "filename": filename,
             "image_width": self.width,   # 紀錄尺寸供前端參考
             "image_height": self.height,
-            "pixel_spacing_um": pixel_spacing,
             "measurements": {}
         }
 
     def _format_value(self, value_px, type="length"):
-        if self.pixel_spacing is None:
-            return {"value": round(float(value_px), 2), "unit": "px"}
-        
-        if type == "length":
-            val_um = value_px * self.pixel_spacing
-            return {"value": round(val_um, 1), "unit": "um"}
-        elif type == "area":
-            val_mm2 = value_px * (self.pixel_spacing ** 2) / 1_000_000
-            return {"value": round(val_mm2, 4), "unit": "mm2"}
+        """一律輸出 px，換算由前端負責"""
+        return {"value": round(float(value_px), 2), "unit": "px"}
 
     def _draw_arrow(self, tip_x, bottom_y, size, color):
         """繪製箭頭於色塊下方：尖端指向灰度值138封閉色塊的底部，三角形與尾巴繪在下方不遮住色塊
@@ -200,6 +188,21 @@ class AMDVisualizer:
                 "color": COLORS[name]["hex"]
             }
 
+    def draw_legend(self):
+        """在左上角繪製圖例，僅顯示有量測結果的 SRF/Cyst/PED"""
+        if not self.results["measurements"]:
+            return
+        order = ["SRF", "Cyst", "PED"]
+        x0, y0 = 12, 12
+        block_size = 12
+        gap = 4
+        for name in order:
+            if name not in self.results["measurements"]:
+                continue
+            color = COLORS[name]["rgb"]
+            self.draw.rectangle([x0, y0, x0 + block_size, y0 + block_size], fill=color)
+            self.draw.text((x0 + block_size + gap, y0), name, fill=(255, 255, 255))
+            y0 += block_size + gap
 
     def save_results(self):
         base_name = os.path.splitext(self.filename)[0]
@@ -251,7 +254,7 @@ def main():
         print(f"請將圖片放入 {INPUT_RAW_DIR} 資料夾")
         return
 
-    print(f"開始分析... (Pixel Spacing: {USER_PIXEL_SPACING})")
+    print(f"開始分析...")
 
     for filename in raw_files:
         raw_path = os.path.join(INPUT_RAW_DIR, filename)
@@ -262,10 +265,11 @@ def main():
             continue
             
         try:
-            viz = AMDVisualizer(raw_path, mask_path, filename, pixel_spacing=USER_PIXEL_SPACING)
+            viz = AMDVisualizer(raw_path, mask_path, filename)
             
             viz.draw_contours()
             viz.draw_vertical_caliper()
+            viz.draw_legend()
             
             img_out, overlay_out, mask_out, json_out = viz.save_results()
             
