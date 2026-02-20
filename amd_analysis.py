@@ -213,32 +213,16 @@ class AMDVisualizer:
         overlay_path = os.path.join(OUTPUT_DIR, overlay_filename)
         self.overlay_image.save(overlay_path)
         
-        # 2. 儲存合成圖 (原始圖像 + 量測結果)
-        # 尺寸保證：self.raw_image 與 self.overlay_image 尺寸完全一致
-        combined_img = Image.alpha_composite(self.raw_image, self.overlay_image)
-        analyzed_filename = f"{base_name}_analyzed.png"
-        analyzed_path = os.path.join(OUTPUT_DIR, analyzed_filename)
-        combined_img.convert("RGB").save(analyzed_path)
-        
-        # 3. 儲存 Mask 與量測結果的合成圖
-        # 尺寸保證：self.mask_image 與 self.overlay_image 尺寸完全一致
-        mask_combined_img = Image.alpha_composite(self.mask_image, self.overlay_image)
-        mask_analyzed_filename = f"{base_name}_mask_analyzed.png"
-        mask_analyzed_path = os.path.join(OUTPUT_DIR, mask_analyzed_filename)
-        mask_combined_img.convert("RGB").save(mask_analyzed_path)
-        
-        # 4. 儲存 JSON
+        # 2. 儲存 JSON
         json_filename = f"{base_name}_result.json"
         json_path = os.path.join(OUTPUT_DIR, json_filename)
         
-        self.results["output_image"] = analyzed_filename
         self.results["overlay_image"] = overlay_filename
-        self.results["mask_analyzed_image"] = mask_analyzed_filename
         
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(self.results, f, indent=4, ensure_ascii=False)
             
-        return analyzed_path, overlay_path, mask_analyzed_path, json_path
+        return overlay_path, json_path
 
 # ==========================================
 # 主程式
@@ -271,13 +255,11 @@ def main():
             viz.draw_vertical_caliper()
             viz.draw_legend()
             
-            img_out, overlay_out, mask_out, json_out = viz.save_results()
+            overlay_out, json_out = viz.save_results()
             
             print(f"完成: {filename}")
             print(f"  -> 尺寸: {viz.width}x{viz.height}")
-            print(f"  -> 合成圖: {img_out}")
             print(f"  -> 透明圖: {overlay_out}")
-            print(f"  -> Mask合成圖: {mask_out}")
             
         except Exception as e:
             print(f"[ERROR] {filename}: {e}")
