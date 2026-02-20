@@ -4,3 +4,5 @@ dataset/
 seg_mask/
 raw_image/
 output_result/
+__pycache__/
+*.pyc
